@@ -71,7 +71,14 @@ figsize = (20, 20)  # (18, 18)
 first_cmap = "Spectral"
 flights_cmap = "cool"
 airport_icon_path = "http://maps.google.com/mapfiles/kml/shapes/airports.png"
-airport_icon = plt.imread(airport_icon_path)
+# airport_icon = plt.imread(airport_icon_path)
+# =============================================================================
+import urllib.request
+from PIL import Image
+import numpy as np
+
+airport_icon = np.array(Image.open(urllib.request.urlopen(airport_icon_path)))
+# =============================================================================
 airport_icon_zoom = 0.4
 airport_name_vertical_shift = 60000
 airport_name_fontsize = 12
