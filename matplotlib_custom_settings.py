@@ -5,8 +5,11 @@ mp3_nozzle_experiment_18032022.ipynb.
 """
 
 import os
+import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot  as plt
+import matplotlib.colors as mcolors
+from cycler import cycler
 from collections import OrderedDict
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -52,6 +55,8 @@ params = {
     'ytick.major.width': hwidth,
     'ytick.major.size': length,
     'xtick.major.size': length,
+    'xtick.major.pad': 10,  # distance between x-tick and label (in points)
+    'ytick.major.pad': 10,  # distance between y-tick and label (in points)
     'xtick.direction': "in",
     'ytick.direction': "in",
     'xtick.top': True,
@@ -85,5 +90,40 @@ grey = (0.5, 0.5, 0.5); lgrey = (0.75, 0.75, 0.75);
 rob_blue_rgb = '#0072BD' # (0, 114, 189) # shade of blue of Rob's PowerPoint template
 whittle_blue_rgb = '#0BACD7' # (11, 172, 215) # shade of blue of Whittle logo
 
+# Colour palette from https://ons-design.notion.site/Colour-335407345de94442b2adccbaa0b0b6e6
+plt.rcParams['axes.prop_cycle'] = cycler('color', ['#206095', '#a8bd3a', '#871a5b', '#f66068', '#05341A', '#27a0cc', '#003c57', '#22d0b6', '#746cb1', '#A09FA0', '#F39431'])
+colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+# Add margins around plot
+def add_margin(ax, m=0.05):
+    for a, s in [(ax.get_xlim, ax.set_xlim), (ax.get_ylim, ax.set_ylim)]:
+        lo, hi = a(); r = hi - lo; s(lo - m*r, hi + m*r)
+        
+# Create opaque colour that looks like it had an alpha < 1.0
+# Combine with `mcolors.to_hex("black")` if don't know hex code
+def opaque_color_from_hex(hex_color, alpha=0.5, background='white'):
+    """Return an opaque RGB color that looks like `hex_color` with transparency `alpha`
+    over the given `background`."""
+    rgba_fg = np.array(mcolors.to_rgba(hex_color))
+    rgba_bg = np.array(mcolors.to_rgba(background))
+    blended_rgb = rgba_fg[:3] * alpha + rgba_bg[:3] * (1 - alpha)
+    return mcolors.to_hex(blended_rgb, keep_alpha=False)
+
+import numpy as np
+import matplotlib.colors as mcolors
+from matplotlib.colors import LinearSegmentedColormap
+
+def make_cmap(hex_color, p=0.5):
+    # alphas = np.linspace(0.1, 1, 256)
+    # alphas = np.linspace(1, 0.1, 256)
+    t = np.linspace(0, 1, 256)
+    alphas = 0.1 + (1 - 0.1) * (1 - t**p)   # p>1 pushes colours lower, p<1 pushes higher
+    colors = [opaque_color_from_hex(hex_color, a) for a in alphas]
+    return LinearSegmentedColormap.from_list("", colors)
+
+cmap_blue  = make_cmap("#206095")
+cmap_green = make_cmap("#a8bd3a")
+cmap_pink  = make_cmap("#871a5b")
 
 
+ 
