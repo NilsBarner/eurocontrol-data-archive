@@ -1,233 +1,233 @@
-#!/usr/bin/env python3
 """
-Spyder-run script:
- - Reads L_AIRCRAFT_TYPE.csv (mapping Code -> Description)
- - Reads T_T100_SEGMENT_ALL_CARRIER_20251014_172649.zip (finds inner CSV)
- - Filters rows whose AIRCRAFT_TYPE corresponds to the given Description
- - Plots DISTANCE vs PASSENGERS for those flights and saves a PNG
+This script plots the payload-range diagram of the three aircraft of interest
+with flight data from the TranStats database for the American market.
+"""
 
-Edit the variables in the "USER CONFIG" section below, then press Run in Spyder.
-"""
+__all__ = []
 
 import os
 import io
+import glob
 import zipfile
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib import gridspec
+from matplotlib_custom_settings import *
 
-# ------------------ USER CONFIG (edit these) ------------------
-# Path to ZIP (or leave as filename if it's in current working dir)
-# ZIP_PATH = os.path.join(os.getcwd(), 'nils', "T_T100_SEGMENT_ALL_CARRIER_20251014_172649.zip")
-ZIP_PATH = os.path.join(os.getcwd(), 'nils', "T_T100_SEGMENT_ALL_CARRIER_20251016_023349.zip")
+# Settings
+aircraft_type = 'A320'  # 'A320', 'A220', 'ATR72'
+distribution_style = 'boxplot'
+zoom_limits = 'box'
 
-# Path to mapping CSV (Code, Description)
+#%% Load payload-range data (each sheet: two columns, x,y)
+
+PR_XLSX = os.path.join(os.getcwd(), 'nils', 'pr_data_ref_ac.xlsx')
+if aircraft_type == 'A320':
+    DESCRIPTION = "Airbus Industrie A320-100/200"
+    pr_data = pd.read_excel(PR_XLSX, sheet_name='A320 neo', header=None, skiprows=1).to_numpy()
+elif aircraft_type == 'A220':
+    DESCRIPTION = "A220-300 BD-500-1A11"
+    pr_data = pd.read_excel(PR_XLSX, sheet_name='A220-300', header=None, skiprows=1).to_numpy()
+elif aircraft_type == 'ATR72':
+    DESCRIPTION = "Aerospatiale/Aeritalia ATR-72"
+    pr_data = pd.read_excel(PR_XLSX, sheet_name='ATR 72-600', header=None, skiprows=1).to_numpy()
+pr_data[:, 0] /= 1.852
+
+#%% Map 'Description' to 'Code' in L_AIRCRAFT_TYPE.csv
+
 MAP_CSV = os.path.join(os.getcwd(), 'nils', "L_AIRCRAFT_TYPE.csv")
-
-# Description to match (exact case-insensitive preferred, otherwise substring)
-# DESCRIPTION = "Aerospatiale/Aeritalia ATR-72"
-DESCRIPTION = "A220-300 BD-500-1A11"
-# DESCRIPTION = "Airbus Industrie A320-100/200"
-
-# Output PNG path
-OUT_PNG = os.path.join(os.getcwd(), "distance_vs_passengers_from_spyder.png")
-
-# Chunk size for streaming the large CSV inside the ZIP
-CHUNKSIZE = 200_000
-# ---------------------------------------------------------------
-
-def load_code_description_map(map_csv_path):
-    """Load mapping CSV and return dict: code_str -> description_str"""
-
-    df = pd.read_csv(map_csv_path, dtype=str, keep_default_na=False)
-    # Heuristic detection for code/description columns
-    cols_lower = [c.lower() for c in df.columns]
-    desc_col = df.columns[cols_lower.index("description")]
-    code_col = df.columns[cols_lower.index("code")]
-    series = df.set_index(code_col)[desc_col].astype(str)
-    # normalize keys/values
-    map_dict = {str(k).strip(): str(v).strip() for k, v in series.to_dict().items()}
-    
-    return map_dict
-
-
-def pick_inner_csv_from_zip(zip_path):
-    """Return the name of the most likely CSV/text file inside the zip."""
-    
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        names = zf.namelist()
-    # prefer files that look like CSV
-    candidates = [n for n in names if n.lower().endswith((".csv", ".txt"))]
-    if candidates:
-        return candidates[0]
-    
-    raise RuntimeError("ZIP archive appears empty.")
-
-
-def sniff_columns_from_sample(zip_path, inner_name, nbytes=200_000):
-    """Read a small byte sample from the inner file and try to parse columns."""
-    
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        with zf.open(inner_name, "r") as fh:
-            sample = fh.read(nbytes)
-    # Try default encoding then latin1 fallback
-    sample_df = pd.read_csv(io.BytesIO(sample), nrows=5)
-    cols = sample_df.columns.tolist()
-    
-    return cols, sample_df
-
-
-def detect_required_columns(sample_cols, sample_df=None):
-    """Detect names for aircraft, distance and passengers in the big CSV."""
-    
-    # common names
-    for c in sample_cols:
-        cl = c.lower()
-        if cl == "aircraft_type":
-            col_air = c
-        if cl == "distance":
-            col_distance = c
-        if cl == "passengers":
-            col_pass = c
-        if cl == "departures_scheduled":
-            col_deps_scheduled = c
-        if cl == "departures_performed":
-            col_deps_performed = c
-        if cl == "seats":
-            col_seats = c
-            
-    return col_air, col_distance, col_pass, col_deps_scheduled, col_deps_performed, col_seats
-
-
-def find_codes_for_description(map_dict, description):
-    """Return list of map codes whose description matches description (exact then substring).
-       Also returns helpful message if none found."""
-       
-    desc_target = str(description).strip().lower()
-    exact = [code for code, desc in map_dict.items() if str(desc).strip().lower() == desc_target]
-    if exact:
-        return exact
-    # substring match
-    sub = [code for code, desc in map_dict.items() if desc_target in str(desc).strip().lower()]
-    
-    return sub
-
-
-def build_code_variants_set(codes):
-    """Return set with original codes and numeric-normalized variants (strip leading zeros)."""
-    s = set()
-    for c in codes:
-        sc = str(c).strip()
-        s.add(sc)
-        # strip leading zeros
-        try:
-            snz = str(int(sc))
-            s.add(snz)
-        except Exception:
-            pass
-        # also add variant without leading zeros if present
-        s.add(sc.lstrip("0"))
-    return s
-
-
-def stream_filter_distance_passengers(zip_path, inner_name, aircraft_col, dist_col, pass_col, col_deps_scheduled, col_deps_performed, col_seats,
-                                      matching_codes_set, chunksize=CHUNKSIZE):
-    """Stream the big CSV inside ZIP in chunks; return list of (distance, passengers) floats."""
-    pairs = []
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        with zf.open(inner_name, "r") as fh:
-            # pandas can read a file-like object in chunks
-            for chunk in pd.read_csv(fh, chunksize=chunksize, dtype=str):
-                # ensure columns exist in this chunk
-                if aircraft_col not in chunk.columns:
-                    continue
-                # coerce to string and strip spaces for safe comparison
-                col_values = chunk[aircraft_col].astype(str).str.strip()
-                mask = col_values.isin(matching_codes_set)
-                if not mask.any():
-                    continue
-                sel = chunk.loc[mask, [dist_col, pass_col, col_deps_scheduled, col_deps_performed, col_seats]].copy()
-                # convert to numeric, drop rows with missing
-                sel[dist_col] = pd.to_numeric(sel[dist_col], errors="coerce")
-                sel[pass_col] = pd.to_numeric(sel[pass_col], errors="coerce")
-                sel[col_deps_scheduled] = pd.to_numeric(sel[col_deps_scheduled], errors="coerce")
-                sel[col_deps_performed] = pd.to_numeric(sel[col_deps_performed], errors="coerce")
-                sel[col_seats] = pd.to_numeric(sel[col_seats], errors="coerce")
-                sel = sel.dropna(subset=[dist_col, pass_col, col_deps_scheduled, col_deps_performed, col_seats])
-                if sel.shape[0] > 0:
-                    arr = sel.to_numpy(dtype=float)
-                    pairs.extend([(float(a), float(b), float(c), float(d), float(e)) for a, b, c, d, e in arr])
-    return pairs
-
-# ------------------ Execution (Spyder-friendly) ------------------
-print("=== Fan-run: Filter & plot DISTANCE vs PASSENGERS ===")
-print("ZIP_PATH:", ZIP_PATH)
-print("MAP_CSV:", MAP_CSV)
-print("DESCRIPTION:", DESCRIPTION)
-print()
-
-# 1) Load mapping
-map_dict = load_code_description_map(MAP_CSV)
-print(f"Loaded mapping entries: {len(map_dict)}")
-
-# 2) Choose inner CSV from ZIP
-inner = pick_inner_csv_from_zip(ZIP_PATH)
-print("Using inner file from ZIP:", inner)
-
-# 3) Read sample and detect columns
-cols, sample_df = sniff_columns_from_sample(ZIP_PATH, inner)
-air_col, dist_col, pass_col, col_deps_scheduled, col_deps_performed, col_seats = detect_required_columns(cols, sample_df)
-print("Detected columns:", "AIRCRAFT=", air_col, "DISTANCE=", dist_col, "PASSENGERS=", pass_col, "DEPARTURES_SCHEDULED=", col_deps_scheduled)
-
-# 4) Find matching map codes for the requested description
-matched_codes = find_codes_for_description(map_dict, DESCRIPTION)
+m = pd.read_csv(MAP_CSV, dtype=str)
+m_index = m.set_index('Code')['Description'].astype(str).to_dict()
+desc_lower = DESCRIPTION.strip().lower()
+matched_codes = [
+    k for k, v in m_index.items() if desc_lower in v.strip().lower()
+]
 if not matched_codes:
-    print("No codes found matching description. Sample of available descriptions (first 20):")
-    for desc in list(map_dict.values())[:20]:
-        print("   ", desc)
-    raise RuntimeError("No matching aircraft codes found for DESCRIPTION: " + str(DESCRIPTION))
-print("Matched mapping codes (count):", len(matched_codes), matched_codes[:20])
+    raise SystemExit("No matching codes for DESCRIPTION.")
 
-# Build set of code variants to be robust to leading zeros / numeric forms
-matching_codes_set = build_code_variants_set(matched_codes)
-print("Matching codes variants (examples):", list(matching_codes_set)[:20])
+#%% Extract parameters from flight data
 
-# 5) Stream filter the CSV inside ZIP and collect (distance, passengers) pairs
-pairs = stream_filter_distance_passengers(ZIP_PATH, inner, air_col, dist_col, pass_col, col_deps_scheduled, col_deps_performed, col_seats,
-                                          matching_codes_set, chunksize=CHUNKSIZE)
-print("Collected pairs (distance, passengers):", len(pairs))
+# Columns of interest
+COL_AIR = "AIRCRAFT_TYPE"
+COL_DIST = "DISTANCE"
+COL_PASS = "PASSENGERS"
+COL_DEPS = "DEPARTURES_PERFORMED"
+COL_PL = "PAYLOAD"
 
-# 6) Plot
-if len(pairs) == 0:
-    print("No flights found for this DESCRIPTION and mapped codes. Nothing to plot.")
-else:
-    arr = np.array(pairs, dtype=float)
-    distance = arr[:, 0]
-    passengers = arr[:, 1]
-    deps_scheduled = arr[:, 2]
-    deps_performed = arr[:, 3]
-    seats = arr[:, 4]
+# Iterate over all ZIP files in directory
+ZIP_PATHS = glob.glob(os.path.join(os.getcwd(), 'nils', '**', '*.zip'), recursive=True)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.scatter(distance, passengers / deps_performed, s=18, alpha=0.6)
-    # ax.scatter(distance, seats / deps_performed, s=18, alpha=0.6)
-    ax.set_xlabel("DISTANCE")
-    ax.set_ylabel("PASSENGERS")
-    ax.set_title(f"DISTANCE vs PASSENGERS for: {DESCRIPTION} (codes: {', '.join(matched_codes[:8])})")
-    ax.grid(True)
-    plt.tight_layout()
-    # save and show
-    fig.savefig(OUT_PNG, dpi=220)
-    print("Saved plot to:", OUT_PNG)
-    plt.show()
+dfs = []
+# ZIP_PATHS = [ZIP_PATHS[0]]
+for ZIP_PATH in ZIP_PATHS:
+    
+    # Pick first CSV-like entry in ZIP
+    with zipfile.ZipFile(ZIP_PATH, 'r') as zf:
+        
+        inner_candidates = [
+            n for n in zf.namelist() if n.lower().endswith(('.csv', '.txt'))
+        ]
+        inner_name = inner_candidates[0] if inner_candidates else zf.namelist()[0]
+        with zf.open(inner_name, 'r') as fh:
+            df = pd.read_csv(io.BytesIO(fh.read()), dtype=str)
+    
+    # Filter rows for matched aircraft types (string compare)
+    codes_set = set([str(c).strip() for c in matched_codes])
+    df = df[df[COL_AIR].astype(str).str.strip().isin(codes_set)].copy()
+    
+    # Compute avg passengers per departure
+    df[COL_PASS] = pd.to_numeric(df[COL_PASS], errors='coerce')
+    df[COL_DEPS] = pd.to_numeric(df[COL_DEPS], errors='coerce')
+    df[COL_PL] = pd.to_numeric(df[COL_PL], errors='coerce')
+    df[COL_DIST] = pd.to_numeric(df[COL_DIST], errors='coerce')
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[COL_PASS, COL_DEPS, COL_DIST, COL_PL])
+    
+    # Additional data
+    df['source_zip'] = os.path.basename(ZIP_PATH)
+    df['source_inner'] = inner_name
+    df['avg_pax'] = df[COL_PASS] / df[COL_DEPS]
+    df['avg_pl'] = df[COL_PL] / df[COL_DEPS]
 
-print("Done.")
+    dfs.append(df)
 
-#%%
+# Combine all dataframes into one large dataframe
+df = pd.concat(dfs, ignore_index=True)
+df = df.drop_duplicates().reset_index(drop=True)
 
-atr72600_pr_data = pd.read_excel(os.path.join(os.getcwd(), 'nils', 'pr_data_ref_ac.xlsx'), header=None, skiprows=1, sheet_name='ATR 72-600').to_numpy()
-a220300_pr_data = pd.read_excel(os.path.join(os.getcwd(), 'nils', 'pr_data_ref_ac.xlsx'), header=None, skiprows=1, sheet_name='A220-300').to_numpy()
-a320neo_pr_data = pd.read_excel(os.path.join(os.getcwd(), 'nils', 'pr_data_ref_ac.xlsx'), header=None, skiprows=1, sheet_name='A320 neo').to_numpy()
+#%% Plotting
 
+fig = plt.figure(figsize=(12,9))
+gs = gridspec.GridSpec(
+    2, 2, width_ratios=[4,1], height_ratios=[1,4], hspace=0.05, wspace=0.05
+)
 
+ax_histx = fig.add_subplot(gs[0,0])
+ax_scatter = fig.add_subplot(gs[1,0])
+ax_histy = fig.add_subplot(gs[1,1])
 
+if distribution_style == 'histogram':
+
+    # x-axis    
+
+    ax_histx.hist(distance, bins=40, edgecolor='black', facecolor='grey')
+    ax_histx.set_xlim(distance.min(), distance.max())
+    ax_histx.set_xticklabels([])
+    ax_histx.set_yticklabels([])
+    ax_histx.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+    # ax_histx.set_ylabel("Count")
+    
+    # y-axis
+    
+    ax_histy.hist(avg_pax, bins=40, orientation='horizontal', edgecolor='black', facecolor='grey')
+    ax_histy.set_ylim(avg_pax.min(), avg_pax.max())
+    ax_histy.set_yticklabels([])
+    ax_histy.set_xticklabels([])
+    ax_histy.tick_params(axis='y', which='both', left=False, labelleft=False)
+    # ax_histy.set_xlabel("Count")
+
+if distribution_style == 'boxplot':
+
+    # x-axis
+
+    ax_histx.boxplot(df[COL_DIST], vert=False, widths=0.6, patch_artist=True,
+                     boxprops=dict(facecolor='none', color='red'),
+                     medianprops=dict(color='red', linewidth=1.5))
+    ax_histx.set_xlim(df[COL_DIST].min(), df[COL_DIST].max())
+    ax_histx.axis('off')
+    
+    # y-axis
+    
+    bp = ax_histy.boxplot([df['avg_pax'].dropna().values], vert=True, positions=[1],
+                          widths=0.6, patch_artist=True, manage_ticks=False)
+    
+    # Style the boxplot artists so they are visible
+    box = bp['boxes'][0]; box.set_facecolor('none'); box.set_edgecolor('red'); box.set_linewidth(0.9)
+    for whisk in bp['whiskers']: whisk.set_color('black'); whisk.set_linewidth(0.8)
+    for cap in bp['caps']: cap.set_color('black'); cap.set_linewidth(0.8)
+    for med in bp['medians']: med.set_color('red'); med.set_linewidth(1.4)
+    for flier in bp.get('fliers', []): flier.set_marker('o'); flier.set_markeredgecolor('black'); flier.set_alpha(0.6)
+    
+    # Zoom into the narrow x-range that contains the single vertical box and align y-range with scatter
+    ax_histy.set_xlim(0.5, 1.5)
+    ax_histy.set_ylim(ax_scatter.get_ylim())
+    
+    # Hide ticks/spines (but not artists)
+    ax_histy.set_xticks([]); ax_histy.set_yticks([])
+    ax_histy.spines['top'].set_visible(False)
+    ax_histy.spines['right'].set_visible(False)
+    ax_histy.spines['left'].set_visible(False)
+    ax_histy.spines['bottom'].set_visible(False)
+
+# Zoom into area where majority of flights are accumulated
+
+if zoom_limits == 'whisker':
+    
+    # Get whisker limits from horizontal (distance) boxplot
+    x_whiskers = [
+        line.get_xdata() for line in ax_histx.lines if len(line.get_xdata()) == 2
+    ]
+    x_vals = np.array(x_whiskers).ravel()
+    x_min, x_max = np.min(x_vals), np.max(x_vals)
+    
+    # Get whisker limits from vertical (avg_pax) boxplot
+    y_whiskers = [
+        line.get_ydata() for line in ax_histy.lines if len(line.get_ydata()) == 2
+    ]
+    y_vals = np.array(y_whiskers).ravel()
+    y_min, y_max = np.min(y_vals), np.max(y_vals)
+    
+    # Draw rectangle on the main scatter axis
+    rect = mpatches.Rectangle(
+        (x_min, y_min),  # bottom-left corner
+        x_max - x_min,  # width
+        y_max - y_min,  # height
+        facecolor='none', edgecolor='red', linewidth=2, zorder=5
+    )
+    ax_scatter.add_patch(rect)
+
+elif zoom_limits == 'box':
+
+    # Compute IQR box extents directly from data (ignore NaNs)
+    x_q1, x_q3 = np.nanpercentile(df[COL_DIST].values, [25, 75])
+    y_q1, y_q3 = np.nanpercentile(df['avg_pax'].values,  [25, 75])
+    
+    # create rectangle at (x_q1, y_q1) with width/height = Q3-Q1
+    rect = mpatches.Rectangle(
+        (x_q1, y_q1),
+        x_q3 - x_q1,
+        y_q3 - y_q1,
+        facecolor='none',
+        edgecolor='red',
+        linewidth=2.0,
+        zorder=6
+    )
+    ax_scatter.add_patch(rect)
+
+# Plot raw data points
+ax_scatter.scatter(df[COL_DIST], df['avg_pax'], s=50, alpha=0.5, marker='.', facecolor='grey', edgecolor='none', label='US flight data')
+
+# Plot payload-range envelope
+pax_max = np.nanmax(df[COL_PASS].to_numpy() / df[COL_DEPS].to_numpy())
+ax_scatter.plot(pr_data[:,0], pr_data[:,1] * pax_max / np.max(pr_data[:,1]) , color='black', lw=1.2, label='Payload-range')
+
+# Main axis settings
+ax_scatter.set_xlabel("Distance (nm)")
+ax_scatter.set_ylabel("Average passenger number per departure (-)")
+ax_scatter.spines[['right', 'top']].set_visible(False)
+ax_scatter.tick_params(axis='both', which='both', length=0)
+ax_scatter.legend(loc='upper right', frameon=False)
+
+# Horizontal historgram axis settings
+ax_histx.set_xlim(ax_scatter.get_xlim())
+ax_histx.spines[['right', 'top', 'bottom', 'left']].set_visible(False)
+ax_histx.tick_params(axis='both', which='both', length=0)
+
+# Vertical historgram axis settings
+ax_histy.set_ylim(ax_scatter.get_ylim())
+ax_histy.spines[['right', 'top', 'left', 'bottom']].set_visible(False)
+ax_histy.tick_params(axis='both', which='both', length=0)
+
+plt.tight_layout()
+plt.show()
